@@ -1,9 +1,7 @@
 package opennlp.textgrounder.preprocess
 
 import net.liftweb.json
-import com.nicta.scoobi._
 import com.nicta.scoobi.Scoobi._
-import com.nicta.scoobi.io.text._
 import java.io._
 import java.lang.Double.isNaN
 import java.text.{SimpleDateFormat, ParseException}
@@ -17,7 +15,7 @@ import opennlp.textgrounder.util.Twokenize
  * --input-corpus argument of tg-geolocate.
  */
 
-object TwitterPull {
+object TwitterPull extends ScoobiApp {
   // tweet = (Timestamp, Text, Lat, Lng, Followers, Following, Number of tweets (since we merge tweets)
   type Tweet = (Int, String, Double, Double, Int, Int, Int)
   // record = (username, Tweet, # of tweets represented)
@@ -200,12 +198,12 @@ object TwitterPull {
     author + "\t" + nice_text
   }
 
-  def main(args: Array[String]) = withHadoopArgs(args) { a =>
+  def run() {
 
     // make sure we get all the input
     val (inputPath, outputPath) =
-      if (a.length == 2) {
-        (a(0), a(1))
+      if (args.length == 2) {
+        (args(0), args(1))
       } else {
         sys.error("Expecting input and output path.")
       }
@@ -219,7 +217,7 @@ object TwitterPull {
     val single_tweets = values_extracted.groupByKey.map(tweet_once)
 
     val checkpoint1 = single_tweets.map(checkpoint_str)
-    DList.persist(TextOutput.toTextFile(checkpoint1, outputPath + "-st"))
+    persist(TextOutput.toTextFile(checkpoint1, outputPath + "-st"))
 
     val lines2: DList[String] = TextInput.fromTextFile(outputPath + "-st")
     val values_extracted2 = lines2.map(from_checkpoint_to_record)
@@ -235,7 +233,7 @@ object TwitterPull {
 
 
     val checkpoint = with_coord.map(checkpoint_str)
-    DList.persist(TextOutput.toTextFile(checkpoint, outputPath + "-cp"))
+    persist(TextOutput.toTextFile(checkpoint, outputPath + "-cp"))
 
     // load from the checkpoint
     val lines_cp: DList[String] = TextInput.fromTextFile(outputPath + "-cp")
@@ -251,7 +249,7 @@ object TwitterPull {
     val nicely_formatted = regrouped_by_author.map(nicely_format_plain)
 
     // save to disk
-    DList.persist(TextOutput.toTextFile(nicely_formatted, outputPath))
+    persist(TextOutput.toTextFile(nicely_formatted, outputPath))
   }
 }
 
