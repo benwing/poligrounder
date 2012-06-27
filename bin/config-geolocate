@@ -8,7 +8,7 @@
 
 # You need to set the following environment variables on input:
 
-# 1. TEXTGROUNDER_DIR: Always required, points to top level of TextGrounder
+# 1. POLIGROUNDER_DIR: Always required, points to top level of TextGrounder
 #                      distribution.
 # 2. Files pointing to the corpora and auxiliary files.  There are various
 #    ways to get these files located:
@@ -66,12 +66,12 @@
 #                   normally /user/$USER.  See also the variable TG_USE_HDFS,
 #                   described above.
 
-if [ -z "$TEXTGROUNDER_DIR" ]; then
-  echo "Must set TEXTGROUNDER_DIR to top level of TextGrounder distribution"
+if [ -z "$POLIGROUNDER_DIR" ]; then
+  echo "Must set POLIGROUNDER_DIR to top level of TextGrounder distribution"
   exit 1
 fi
 
-TG_PYTHON_DIR="$TEXTGROUNDER_DIR/src/main/python"
+TG_PYTHON_DIR="$POLIGROUNDER_DIR/src/main/python"
 
 TG_HADOOP_DIR=${TG_HADOOP_DIR:-textgrounder-data}
 
@@ -101,13 +101,13 @@ fi
 
 if [ "$TG_REAL_USE_HDFS" = yes ]; then
   TG_FILE_PREF=
-  TEXTGROUNDER_URL=$TG_HADOOP_DIR
+  POLIGROUNDER_URL=$TG_HADOOP_DIR
 elif [ "$HADOOP" = yes ]; then
   TG_FILE_PREF=file:
-  TEXTGROUNDER_URL=file:$TEXTGROUNDER_DIR
+  POLIGROUNDER_URL=file:$POLIGROUNDER_DIR
 else
   TG_FILE_PREF=
-  TEXTGROUNDER_URL=$TEXTGROUNDER_DIR
+  POLIGROUNDER_URL=$POLIGROUNDER_DIR
 fi
 
 TG_CORPUS_URL=$TG_FILE_PREF$TG_CORPUS_DIR
@@ -205,7 +205,7 @@ set_wp_version $WP_VERSION
 
 # Include local configuration if it exists
 
-if [ -e "$TEXTGROUNDER_DIR/bin/local-config-geolocate" ]; then
-  . "$TEXTGROUNDER_DIR/bin/local-config-geolocate"
+if [ -e "$POLIGROUNDER_DIR/bin/local-config-geolocate" ]; then
+  . "$POLIGROUNDER_DIR/bin/local-config-geolocate"
 fi
 
