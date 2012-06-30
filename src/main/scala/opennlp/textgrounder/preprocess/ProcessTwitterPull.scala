@@ -1,5 +1,5 @@
 ///////////////////////////////////////////////////////////////////////////////
-//  TwitterPull.scala
+//  ProcessTwitterPull.scala
 //
 //  Copyright (C) 2012 Stephen Roller, The University of Texas at Austin
 //  Copyright (C) 2012 Ben Wing, The University of Texas at Austin
@@ -32,35 +32,43 @@ import opennlp.textgrounder.util.Twokenize
 /*
  * This program takes, as input, files which contain one tweet
  * per line in json format as directly pulled from the twitter
- * API. It outputs a folder that may be used as the --input-corpus
- * argument of tg-geolocate.  This is in "TextGrounder corpus" format,
- * with one document per line, fields separated by tabs, and all the words and
- * counts placed in a single field, of the form "WORD1:COUNT1 WORD2:COUNT2 ...".
+ * API. It combines the tweets either by user or by time, and outputs a
+ * folder that may be used as the --input-corpus argument of tg-geolocate.
+ * This is in "TextGrounder corpus" format, with one document per line,
+ * fields separated by tabs, and all the words and counts placed in a single
+ * field, of the form "WORD1:COUNT1 WORD2:COUNT2 ...".
+ *
  * The fields currently output are:
  *
  * 1. user
  * 2. timestamp
- * 3. latitude
- * 4. longitude
- * 5. number of followers (people following the user)
- * 6. number of people the user is following
- * 7. number of tweets merged to form the per-user document
+ * 3. latitude,longitude
+ * 4. number of followers (people following the user)
+ * 5. number of people the user is following
+ * 6. number of tweets merged to form the per-user document
+ * 7. unigram text of combined tweets
  *
- * No schema is generated; it must be created by hand.
+ * NOTE: A schema is generated and properly named, but the main file is
+ * currently given a name by Scoobi and needs to be renamed to correspond
+ * with the schema file: e.g. if the schema file is called
+ * "sep-22-debate-training-unigram-counts-schema.txt", then the main file
+ * should be called "sep-22-debate-training-unigram-counts.txt".
  *
- * FIXME: The corpus is supposed to have latitude and longitude as a single
- * "coordinate" field, but they appear to be separate fields here.
- *
- * The code first merges by user, using the earliest geolocated tweet as the
+ * When merging by user, the code uses the earliest geolocated tweet as the
  * user's location; tweets with a bounding box as their location rather than a
  * single point are treated as if they have no location.  Then the code filters
  * out users that have no geolocation or have a geolocation outside of North
- * America (according to a crude bounding box), as well as those that are identified
- * as likely "spammers" according to their number of followers and number of
- * people they are following.
+ * America (according to a crude bounding box), as well as those that are
+ * identified as likely "spammers" according to their number of followers and
+ * number of people they are following.
  */
 
-class Options(val keytype: String, val timeslice: Int) { }
+class TwitterPullOptions {
+  var keytype = "user"
+  var timeslice = 6000L
+  var corpus_name = "unknown"
+  var split = "training"
+}
 
 object TwitterPull extends ScoobiApp {
   // Tweet = Data for a tweet other than the tweet ID =
@@ -94,13 +102,13 @@ object TwitterPull extends ScoobiApp {
 
   /**
    * Convert a Twitter timestamp, e.g. "Tue Jun 05 14:31:21 +0000 2012", into
-   * a time in seconds since the Epoch (Jan 1 1970, or so).
+   * a time in milliseconds since the Epoch (Jan 1 1970, or so).
    */
   def parse_time(timestring: String): Long = {
     val sdf = new SimpleDateFormat("EEE MMM dd HH:mm:ss ZZZZZ yyyy")
     try {
       sdf.parse(timestring)
-      sdf.getCalendar.getTimeInMillis / 1000
+      sdf.getCalendar.getTimeInMillis
     } catch {
       case pe: ParseException => 0
     }
@@ -175,7 +183,7 @@ object TwitterPull extends ScoobiApp {
    * Parse a JSON line into a tweet.  Return value is an IDRecord, including
    * the tweet ID, username, text and all other data.
    */
-  def parse_json(line: String, opts: Options): IDRecord = {
+  def parse_json(line: String, opts: TwitterPullOptions): IDRecord = {
     try {
       val parsed = json.parse(line)
       val user = force_value(parsed \ "user" \ "screen_name")
@@ -291,6 +299,12 @@ object TwitterPull extends ScoobiApp {
   def from_checkpoint_to_record(line: String): Record = {
     val split = line.split("\t\t")
     val (tweet_no_text, text) = (split(0), split(1))
+    val (key, (user, ts, lat, lng, fers, fing, numtw)) =
+      split_tweet_no_text(tweet_no_text)
+    (key, (user, ts, text, lat, lng, fers, fing, numtw))
+  }
+
+  def split_tweet_no_text(tweet_no_text: String): (String, TweetNoText) = {
     val split2 = tweet_no_text.split("\t")
     val key = split2(0)
     val user = split2(1)
@@ -300,7 +314,7 @@ object TwitterPull extends ScoobiApp {
     val fers = split2(5).toInt
     val fing = split2(6).toInt
     val numtw = split2(7).toInt
-    (key, (user, ts, text, lat, lng, fers, fing, numtw))
+    (key, (user, ts, lat, lng, fers, fing, numtw))
   }
 
   def from_checkpoint_to_tweet_text(line: String): (String, String) = {
@@ -337,25 +351,61 @@ object TwitterPull extends ScoobiApp {
     (tweet_no_text, (word, c))
   }
 
+  /**
+   * Given tweet data minus text plus an iterable of word-count pairs,
+   * convert to a string suitable for outputting.
+   */
   def nicely_format_plain(twcs: (String, Iterable[WordCount])): String = {
     val (tweet_no_text, wcs) = twcs
     val nice_text = wcs.map((w: WordCount) => w._1 + ":" + w._2).mkString(" ")
-    // Need to drop the first field, which is the key.
-    tweet_no_text.dropWhile(_ != '\t').tail + "\t" + nice_text
+    val (key, (user, ts, lat, lng, fers, fing, numtw)) =
+      split_tweet_no_text(tweet_no_text)
+    // Latitude/longitude need to be combined into a single field, but only
+    // if both actually exist.
+    val latlngstr =
+      if (!isNaN(lat) && !isNaN(lng))
+        "%s,%s" format (lat, lng)
+      else ""
+    // Put back together but drop key.
+    Seq(user, ts, latlngstr, fers, fing, numtw, nice_text) mkString "\t"
+  }
+
+  def output_schema(outputPath: String, opts: TwitterPullOptions) {
+    val filename =
+      "%s/%s-%s-unigram-counts-schema.txt" format
+        (outputPath, opts.corpus_name, opts.split)
+    val p = new PrintWriter(new File(filename))
+    def print_seq(s: String*) {
+      p.println(s mkString "\t")
+    }
+    try {
+      print_seq("user", "timestamp", "coord", "followers", "following",
+        "numtweets", "counts")
+      print_seq("corpus", opts.corpus_name)
+      print_seq("corpus-type", "twitter-%s" format opts.keytype)
+      if (opts.keytype == "timestamp")
+        print_seq("corpus-timeslice", opts.timeslice.toString)
+      print_seq("split", opts.split)
+    } finally { p.close() }
   }
 
   def run() {
-    var by_time = false
-    var timeslice = 6
+    val opts = new TwitterPullOptions
     var a = args
 
     breakable {
       while (a.length > 0) {
         if (a(0) == "--by-time") {
-          by_time = true
+          opts.keytype = "timestamp"
           a = a.tail
         } else if (a(0) == "--timeslice" || a(0) == "--time-slice") {
-          timeslice = a(1).toInt
+          opts.timeslice = (a(1).toDouble * 1000).toLong
+          a = a.tail.tail
+        } else if (a(0) == "--name") {
+          opts.corpus_name = a(1)
+          a = a.tail.tail
+        } else if (a(0) == "--split") {
+          opts.split = a(1)
           a = a.tail.tail
         } else break
       }
@@ -368,8 +418,6 @@ object TwitterPull extends ScoobiApp {
       } else {
         sys.error("Expecting input and output path.")
       }
-
-    val opts = new Options(if (by_time) "timestamp" else "user", timeslice)
 
     // Firstly we load up all the (new-line-separated) JSON lines.
     val lines: DList[String] = TextInput.fromTextFile(inputPath)
@@ -403,7 +451,7 @@ object TwitterPull extends ScoobiApp {
     // North America.  FIXME: We still want to filter spammers; but this
     // is trickier when not grouping by user.  How to do it?
     val with_coord =
-      if (by_time) concatted
+      if (opts.keytype == "timestamp") concatted
       else
         concatted.filter(has_latlng).filter(is_nonspammer).
           filter(northamerica_only)
@@ -438,6 +486,9 @@ object TwitterPull extends ScoobiApp {
 
     // Save to disk.
     persist(TextOutput.toTextFile(nicely_formatted, outputPath))
+
+    // create a schema
+    output_schema(outputPath, opts)
   }
 }
 
