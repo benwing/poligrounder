@@ -64,7 +64,7 @@ import opennlp.textgrounder.util.argparser._
  * number of people they are following.
  */
 
-class TwitterPullParams(ap: ArgParser) {
+class ProcessTwitterPullParams(ap: ArgParser) {
   // The following is set based on presence or absence of --by-time
   var keytype = "user"
   var timeslice_float =
@@ -84,7 +84,7 @@ class TwitterPullParams(ap: ArgParser) {
     help = "Destination directory to place files in.")
 }
 
-object TwitterPull extends ScoobiApp {
+object ProcessTwitterPull extends ScoobiApp {
   // Tweet = Data for a tweet other than the tweet ID =
   // (user, timestamp, text, lat, lng, followers, following, number of tweets)
   // Note that we have "number of tweets" since we merge multiple tweets into
@@ -197,7 +197,7 @@ object TwitterPull extends ScoobiApp {
    * Parse a JSON line into a tweet.  Return value is an IDRecord, including
    * the tweet ID, username, text and all other data.
    */
-  def parse_json(line: String, opts: TwitterPullParams): IDRecord = {
+  def parse_json(line: String, opts: ProcessTwitterPullParams): IDRecord = {
     try {
       val parsed = json.parse(line)
       val user = force_value(parsed \ "user" \ "screen_name")
@@ -384,7 +384,7 @@ object TwitterPull extends ScoobiApp {
     Seq(user, ts, latlngstr, fers, fing, numtw, nice_text) mkString "\t"
   }
 
-  def output_schema(opts: TwitterPullParams) {
+  def output_schema(opts: ProcessTwitterPullParams) {
     val filename =
       "%s/%s-%s-unigram-counts-schema.txt" format
         (opts.output, opts.corpus_name, opts.split)
@@ -408,9 +408,9 @@ object TwitterPull extends ScoobiApp {
     // This first call is necessary, even though it doesn't appear to do
     // anything.  In particular, this ensures that all arguments have been
     // defined on `ap` prior to parsing.
-    new TwitterPullParams(ap)
+    new ProcessTwitterPullParams(ap)
     ap.parse(args)
-    val opts = new TwitterPullParams(ap)
+    val opts = new ProcessTwitterPullParams(ap)
     if (opts.by_time)
       opts.keytype = "timestamp"
     opts.timeslice = (opts.timeslice_float * 1000).toLong
