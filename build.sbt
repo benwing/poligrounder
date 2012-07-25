@@ -137,4 +137,4 @@ mergeStrategy in assembly <<= (mergeStrategy in assembly) { (old) =>
   }
 }
 
-jarName in assembly := "textgrounder-assembly.jar"
+// jarName in assembly := "textgrounder-assembly.jar"
