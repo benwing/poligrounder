@@ -75,7 +75,7 @@ abstract class UnigramWordDist(
   override def toString = {
     val finished_str =
       if (!finished) ", unfinished" else ""
-    val num_words_to_print = 15
+    val num_words_to_print = 100
     val need_dots = counts.size > num_words_to_print
     val items =
       for ((word, count) <- counts.toSeq.sortWith(_._2 > _._2).view(0, num_words_to_print))
