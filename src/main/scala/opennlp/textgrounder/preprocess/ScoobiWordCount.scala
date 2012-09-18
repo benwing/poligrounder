@@ -35,6 +35,8 @@ object ScoobiWordCount extends ScoobiApp {
     val counts = lines.flatMap(splitit)
                           .map(word => (word, 1))
                           .groupByKey
+                          // test bug triggered by filter after groupBy
+                          // .filter { case (word, len) => word.length < 8 }
                           .combine((a: Int, b: Int) => a + b)
     persist(toTextFile(counts, args(1)))
   }
