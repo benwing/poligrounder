@@ -45,30 +45,37 @@ import tgutil.timeutil._
 class ParseTweetsParams(ap: ArgParser) extends
     ScoobiProcessFilesParams(ap) {
   var grouping = ap.option[String]("grouping", "g", "gr", "group",
+    default = "none",
     choices = Seq("user", "time", "none"),
     help="""Mode for grouping tweets.  There are currently three methods
     of grouping: `user`, `time` (i.e. all tweets within a given
     timeslice, specified with `--timeslice`) and `none` (no grouping;
     tweets are passed through directly, after duplicated tweets have been
-    removed).  Default is `user` when `--ouput-format=corpus`, and `none`
-    otherwise.""")
+    removed).  Default is `%default`.  Tweet grouping is used for two
+    purposes: For filtering by group (using `--filter-groups` or
+    `--cfilter-groups`) and for outputting grouped tweets using
+    `--output-format=grouped-corpus`.""")
   var output_format = ap.option[String]("output-format", "of",
-    choices = Seq("corpus", "stats", "raw"),
+    choices = Seq("corpus", "grouped-corpus", "ungrouped-corpus",
+      "stats", "raw"),
     default = "corpus",
     help="""Format for output of tweets or tweet groups.  Possibilities are
     
-    -- `corpus` (Store in a TextGrounder-style corpus, i.e. as a simple database
-    with one record per line, fields separated by TAB characters, and a
-    schema indicating the names of the columns.)
+    -- `corpus`, `grouped-corpus`, `ungrouped-corpus` (Store in a
+    TextGrounder-style corpus, i.e. as a simple database with one record per
+    line, fields separated by TAB characters, and a schema indicating the names
+    of the columns. An `ungrouped-corpus` is simply where each record
+    corresponds to an individual tweet, while in a `grouped-corpus`, each
+    record corresponds to a group of tweets, according to `--grouping`.
+    The value of `corpus` is an alias for one of the other two: `grouped-corpus`
+    if a value of `--grouping` other than `none` is specified,
+    `ungrouped-corpus` otherwise.)
   
-    -- `raw` (Simply output JSON-formatted tweets directly, exactly as received;
-    only possible for `--grouping=none`, in which case the input tweets will be
-    output directly, after removing duplicates.)
+    -- `raw` (Simply output JSON-formatted tweets directly, exactly as
+    received.)
     
     -- `stats` (Corpus-style output with statistics on the tweets, users, etc.
-    rather than the tweets themselves.  Generally doesn't make much sense when
-    used with any kind of grouping, because it will then output statistics on
-    the results of grouping rather than on the actual tweets.)""")
+    rather than outputting the tweets themselves.)""")
   var corpus_name = ap.option[String]("corpus-name",
     help="""Name of output corpus; for identification purposes.
     Default to name taken from input directory.""")
@@ -189,14 +196,33 @@ geotag outside of North America.  Also filter on min/max-followers, etc.""")
 
   override def check_usage() {
     timeslice = (timeslice_float * 1000).toLong
-    if (grouping == null)
-      grouping = if (output_format == "corpus") "user" else "none"
-    if (output_format == "raw" && grouping != "none")
-      ap.usageError("`raw` output format only allowed when `--grouping=none`")
+    if (output_format == "corpus") {
+      if (grouping != "none")
+        output_format = "grouped-corpus"
+      else
+        output_format = "ungrouped-corpus"
+    }
+    if (output_format == "grouped-corpus" && grouping == "none")
+      ap.usageError("`grouped-corpus` output format not allowed when `--grouping=none`")
   }
 }
 
 object ParseTweets extends ScoobiProcessFilesApp[ParseTweetsParams] {
+
+  /* This is a temporary fix for a bug in Scoobi when doing a filter() between
+     a groupBy and a combine().  We temporarily need to substitute combine()
+     with safeCombine(). */
+  implicit def toPimpedDlist[K,V](dl: DList[(K, Iterable[V])]) = new PimpedDList(dl)
+  class PimpedDList[K,V](dl: DList[(K,Iterable[V])]) {
+      def safeCombine(f: (V, V) => V)
+        (implicit mK: Manifest[K],
+         wtK: WireFormat[K],
+         grpK: Grouping[K],
+         mV: Manifest[V],
+         wtV: WireFormat[V]): DList[(K, V)] = dl.map {
+           case (k, vs) => (k, vs.reduce(f)) }
+    }
+
   /*
    * This program takes, as input, files which contain one tweet per line
    * in JSON format as directly pulled from the twitter API. It groups the
@@ -1154,6 +1180,9 @@ object ParseTweets extends ScoobiProcessFilesApp[ParseTweetsParams] {
       northamerica_only(tw)
     }
 
+    def any_matches(x: (String, Iterable[Record])) =
+      x._2.toList.exists(_.matches)
+
     def apply(tweets: DList[Tweet]) = {
       // Group by grouping key (username, timestamp, etc.).  username, then combine the records for a user into a
       // tweet combination, with text concatenated and the location taken
@@ -1164,8 +1193,8 @@ object ParseTweets extends ScoobiProcessFilesApp[ParseTweetsParams] {
         map(tweet_to_record).   // convert to Record (which contains grouping
                                 // key and group-level filter result)
         groupBy(_.key).         // group on grouping key
-        combine(merge_records). // merge value tweet records
-        filter(_._2.matches).   // apply group-level user filters
+        filter(any_matches).
+        safeCombine(merge_records). // merge value tweet records
         map(_._2.tweet)         // convert back to Tweet
 
       // If grouping by user, filter the tweet combinations, removing users
@@ -1595,7 +1624,8 @@ object ParseTweets extends ScoobiProcessFilesApp[ParseTweetsParams] {
       val fields = Tweet.row_fields ++ Seq("counts")
       val fixed_fields = Map(
         "corpus" -> opts.corpus_name,
-        "corpus-type" -> ("twitter-%s" format opts.grouping),
+        "corpus-type" -> ("twitter-%s" format
+          (if (opts.grouping == "none") "tweets" else opts.grouping)),
         "split" -> opts.split
       ) ++ (
         if (opts.grouping == "time")
@@ -1628,10 +1658,12 @@ object ParseTweets extends ScoobiProcessFilesApp[ParseTweetsParams] {
         "not grouping"
     }))
     errprint("ParseTweets: " + (opts.output_format match {
-      case "corpus" =>
-        "outputting tweets as a TextGrounder corpus"
+      case "ungrouped-corpus" =>
+        "outputting (ungrouped) tweets as a TextGrounder corpus"
+      case "grouped-corpus" =>
+        "outputting tweet groups as a TextGrounder corpus"
       case "raw" =>
-        "outputting tweets as raw JSON"
+        "outputting ungrouped tweets as raw JSON"
       case "stats" =>
         "outputting statistics on tweets"
     }))
@@ -1648,8 +1680,8 @@ object ParseTweets extends ScoobiProcessFilesApp[ParseTweetsParams] {
       if (opts.grouping == "none") tweets1
       else new GroupTweets(opts)(tweets1)
 
-    def dlist_output_lines(lines: DList[String], corpus_suffix: String,
-        fields: Seq[String]) = {
+    def dlist_output_lines(lines: DList[String],
+        corpus_suffix: String, fields: Seq[String]) = {
       val outdir = opts.output + "-" + corpus_suffix
       persist(TextOutput.toTextFile(lines, outdir))
       val out_schema = new Schema(fields, Map("corpus" -> opts.corpus_name))
@@ -1661,8 +1693,8 @@ object ParseTweets extends ScoobiProcessFilesApp[ParseTweetsParams] {
       outdir
     }
 
-    def local_output_lines(lines: Iterable[String], corpus_suffix: String,
-        fields: Seq[String]) = {
+    def local_output_lines(lines: Iterable[String],
+        corpus_suffix: String, fields: Seq[String]) = {
       val outdir = opts.output + "-" + corpus_suffix
       filehand.make_directories(outdir)
       val out_schema = new Schema(fields, Map("corpus" -> opts.corpus_name))
@@ -1688,7 +1720,7 @@ object ParseTweets extends ScoobiProcessFilesApp[ParseTweetsParams] {
         persist(TextOutput.toTextFile(tweets.map(_.json), opts.output))
         rename_outfiles()
       }
-      case "corpus" => {
+      case "grouped-corpus" | "ungrouped-corpus" => {
         val tfct = new TokenizeCountAndFormat(opts)
         // Tokenize the combined text into words, possibly generate ngrams
         // from them, count them up and output results formatted into a record.
