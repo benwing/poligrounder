@@ -29,8 +29,8 @@ import org.apache.log4j.{Level=>JLevel,_}
 import org.apache.hadoop.fs.{FileSystem => HFileSystem, Path, FileStatus}
 
 import com.nicta.scoobi.Scoobi._
-import com.nicta.scoobi.testing.HadoopLogFactory
-// import com.nicta.scoobi.application.HadoopLogFactory
+// import com.nicta.scoobi.testing.HadoopLogFactory
+import com.nicta.scoobi.application.HadoopLogFactory
 
 import opennlp.textgrounder.util.argparser._
 import opennlp.textgrounder.util.osutil._
