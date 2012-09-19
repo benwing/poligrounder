@@ -19,6 +19,7 @@
 package opennlp.textgrounder.preprocess
 
 import collection.JavaConversions._
+import collection.mutable
 
 import java.io._
 import java.lang.Double.isNaN
@@ -45,13 +46,13 @@ import tgutil.timeutil._
 class ParseTweetsParams(ap: ArgParser) extends
     ScoobiProcessFilesParams(ap) {
   var grouping = ap.option[String]("grouping", "g", "gr", "group",
-    choices = Seq("user", "time", "none"),
-    help="""Mode for grouping tweets.  There are currently three methods
+    choices = Seq("user", "time", "file", "none"),
+    help="""Mode for grouping tweets.  There are currently four methods
     of grouping: `user`, `time` (i.e. all tweets within a given
-    timeslice, specified with `--timeslice`) and `none` (no grouping;
-    tweets are passed through directly, after duplicated tweets have been
-    removed).  Default is `user` when `--ouput-format=corpus`, and `none`
-    otherwise.""")
+    timeslice, specified with `--timeslice`), `file` (all tweets within a
+    given input file) and `none` (no grouping; tweets are passed through
+    directly, after duplicated tweets have been removed).  Default is
+    `user` when `--ouput-format=corpus`, and `none` otherwise.""")
   var output_format = ap.option[String]("output-format", "of",
     choices = Seq("corpus", "stats", "raw"),
     default = "corpus",
@@ -161,6 +162,46 @@ Look for any tweets containing the word "clinton" as well as either the words
   var cfilter_tweets = ap.option[String]("cfilter-tweets",
     help="""Boolean expression used to filter tweets to be output, with
     case-sensitive matching.  Format is identical to `--filter-tweets`.""")
+  var output_fields = ap.option[String]("output-fields",
+    default="default",
+    help="""Fields to output in corpus format.  This should consist of one or
+    more directives, separated by spaces or commas.  Directives are processed
+    sequentially.  Each directive should be one of
+    
+    1. A field name, meaning to include that field
+
+    2. A field name with a preceding - sign, meaning to exclude that field
+    
+    3. The directive 'all', meaning to include all fields, canceling any
+       previous directives.
+    
+    4. The directive 'none', meaning to include no fields, canceling any
+       previous directives.
+    
+    5. The directive 'default', meaning to set the current fields to output
+       to the default (which may vary depending on other settings), canceling
+       any previous directives.
+    
+    Currently, some fields are always output, and not subject to
+    modification through this setting.
+
+    Currently recognized optional fields:
+
+    'user-mentions': List of users mentioned, along with counts
+
+    'retweets': List of users from which tweets were retweeted, with counts
+
+    'hashtags': List of hashtags, with counts
+
+    'urls': List of URL's, with counts
+
+    'text': Actual text of all tweets
+
+    'counts': All words, with counts
+
+    The default for all types of grouping except 'file' is to include
+    everything.  For 'file', none of the above fields are included by
+    default.""")
   var filter_groups = ap.option[String]("filter-groups",
     help="""Boolean expression used to filter on the grouped-tweet level.
   This is like `--filter-tweets` but filters groups of tweets (grouped
@@ -187,12 +228,45 @@ geotag outside of North America.  Also filter on min/max-followers, etc.""")
     help="""Maximum number of tweets per user for user to be accepted in
     --by-user mode.""")
 
+  def parse_output_fields(fieldspec: String) = {
+    val directives = fieldspec.split("[ ,]")
+    val optfields = mutable.LinkedHashSet[String]()
+    for (direc <- Array("default") ++ directives) {
+      direc match {
+        case "default" => {
+          optfields.clear()
+          optfields ++= ParseTweets.Tweet.default_optional_fields(this)
+        }
+        case "all" => {
+          optfields.clear()
+          optfields ++= ParseTweets.Tweet.all_optional_fields
+        }
+        case "none" => {
+          optfields.clear()
+        }
+        case x if ParseTweets.Tweet.all_optional_fields contains x => {
+          optfields += x
+        }
+        case x if x.length > 0 && x(0) == '-' &&
+            (ParseTweets.Tweet.all_optional_fields contains x.tail) => {
+          optfields -= x.tail
+        }
+        case x => { ap.usageError(
+          "Unrecognized directive '%s' in --output-fields" format x)
+        }
+      }
+    }
+    optfields.toSeq
+  }
+  var optional_fields: Seq[String] = null
+
   override def check_usage() {
     timeslice = (timeslice_float * 1000).toLong
     if (grouping == null)
       grouping = if (output_format == "corpus") "user" else "none"
     if (output_format == "raw" && grouping != "none")
       ap.usageError("`raw` output format only allowed when `--grouping=none`")
+    optional_fields = parse_output_fields(output_fields)
   }
 }
 
@@ -231,7 +305,8 @@ object ParseTweets extends ScoobiProcessFilesApp[ParseTweetsParams] {
   /**
    * Data for a tweet or grouping of tweets.
    *
-   * @param line Raw JSON for tweet; only stored when --output-format=raw
+   * @param json Raw JSON for tweet; only stored when --output-format=raw
+   * @param path Path of file that the tweet came from
    * @param text Text for tweet or tweets (a Seq in case of multiple tweets)
    * @param user User name (FIXME: or one of them, when going by time; should
    *    do something smarter)
@@ -253,6 +328,7 @@ object ParseTweets extends ScoobiProcessFilesApp[ParseTweetsParams] {
    */
   case class Tweet(
     json: String,
+    path: String,
     text: Seq[String],
     user: String,
     id: TweetID,
@@ -274,13 +350,13 @@ object ParseTweets extends ScoobiProcessFilesApp[ParseTweetsParams] {
        some less obvious places.  In all:
 
        -- the doc string just above
-       -- the definition of to_row(), Tweet.empty() and Tweet.row_fields()
+       -- the definition of to_row() and Tweet.row_fields()
        -- parse_json_lift() below
        -- merge_records() below
        -- TweetFilterParser.main() below
     */
   ) {
-    def to_row = {
+    def to_row_always = {
       import Encoder.{long => elong, _}
       // Latitude/longitude need to be combined into a single field, but only
       // if both actually exist.
@@ -291,6 +367,7 @@ object ParseTweets extends ScoobiProcessFilesApp[ParseTweetsParams] {
       Seq(
         string(user),
         elong(id),
+        string(path),
         timestamp(min_timestamp),
         timestamp(max_timestamp),
         timestamp(geo_timestamp),
@@ -298,28 +375,48 @@ object ParseTweets extends ScoobiProcessFilesApp[ParseTweetsParams] {
         int(followers),
         int(following),
         string(lang),
-        int(numtweets),
-        count_map(user_mentions),
-        count_map(retweets),
-        count_map(hashtags),
-        count_map(urls),
-        seq_string(text)
-      ) mkString "\t"
+        int(numtweets)
+      )
     }
+
+    def to_row_optional(tokenize_act: TokenizeCountAndFormat,
+        include_fields: Seq[String]) = {
+      import Encoder.{long => elong, _}
+      val optfields = mutable.Buffer[String]()
+      for (field <- include_fields) {
+        val fieldval = field match {
+          case "user-mentions" => count_map(user_mentions)
+          case "retweets" => count_map(retweets)
+          case "hashtags" => count_map(hashtags)
+          case "urls" => count_map(urls)
+          case "text" => seq_string(text)
+          case "counts" => tokenize_act.emit_ngrams(text)
+        }
+        optfields += fieldval
+      }
+      optfields.toSeq
+    }
+
+    def to_row(tokenize_act: TokenizeCountAndFormat, opts: ParseTweetsParams) =
+      (to_row_always ++ to_row_optional(tokenize_act, opts.optional_fields)
+      ) mkString "\t"
   }
 
   object Tweet {
-    def empty =
-      Tweet("", Seq[String](), "unknown", 0, 0, 0, 0,
-        Double.NaN, Double.NaN, 0, 0, "unknown", 0,
-        Map[String, Int](), Map[String, Int](),
-        Map[String, Int](), Map[String, Int]())
+    def row_fields_always =
+      Seq("user", "id", "path", "min-timestamp", "max-timestamp",
+        "geo-timestamp", "coord", "followers", "following", "lang",
+        "numtweets")
 
-    def row_fields =
-      Seq("user", "id", "min-timestamp", "max-timestamp",
-        "geo-timestamp","coord", "followers", "following", "lang",
-        "numtweets", "user-mentions", "retweets", "hashtags", "urls",
-        "text")
+    val all_optional_fields =
+      Seq("user-mentions", "retweets", "hashtags", "urls", "text", "counts")
+    def default_optional_fields(opts: ParseTweetsParams) = {
+      if (opts.grouping == "file") Seq[String]()
+      else all_optional_fields
+    }
+
+    def row_fields(opts: ParseTweetsParams) =
+      row_fields_always ++ opts.optional_fields
   }
   implicit val tweetWire = mkCaseWireFormat(Tweet.apply _, Tweet.unapply _)
 
@@ -338,10 +435,6 @@ object ParseTweets extends ScoobiProcessFilesApp[ParseTweetsParams] {
     tweet: Tweet
   )
   implicit val recordWire = mkCaseWireFormat(Record.apply _, Record.unapply _)
-
-  object Record {
-    def empty = Record("", true, Tweet.empty)
-  }
 
   /**
    * A generic action in the ParseTweets app.
@@ -585,7 +678,7 @@ object ParseTweets extends ScoobiProcessFilesApp[ParseTweetsParams] {
           "Unable to parse date %s" format args(1))
       }
       val tweet =
-        Tweet("", Seq(text), "user", 0, timestamp, timestamp,
+        Tweet("", "", Seq(text), "user", 0, timestamp, timestamp,
           timestamp, Double.NaN, Double.NaN, 0, 0, "unknown", 1,
           Map[String, Int](), Map[String, Int](),
           Map[String, Int](), Map[String, Int]())
@@ -593,15 +686,17 @@ object ParseTweets extends ScoobiProcessFilesApp[ParseTweetsParams] {
     }
   }
 
-  class ParseAndUniquifyTweets(opts: ParseTweetsParams)
-      extends ParseTweetsAction {
+  class ParseAndUniquifyTweets(
+      opts: ParseTweetsParams,
+      set_counters: Boolean = true
+    ) extends ParseTweetsAction {
 
     val operation_category = "Parse"
 
-    /**
-     * An empty tweet.
-     */
-    val empty_tweet = Tweet.empty
+    def maybe_counter(counter: String) {
+      if (set_counters)
+        bump_counter(counter)
+    }
 
     // Used internally to force an exit when a problem in parse_json_lift
     // occurs.
@@ -612,7 +707,7 @@ object ParseTweets extends ScoobiProcessFilesApp[ParseTweetsParams] {
      *
      * @return status and tweet.
      */
-    def parse_json_lift(line: String): (String, Tweet) = {
+    def parse_json_lift(path: String, line: String): (String, Tweet) = {
 
       /**
        * Convert a Twitter timestamp, e.g. "Tue Jun 05 14:31:21 +0000 2012",
@@ -625,7 +720,7 @@ object ParseTweets extends ScoobiProcessFilesApp[ParseTweetsParams] {
           sdf.getCalendar.getTimeInMillis
         } catch {
           case pe: ParseException => {
-            bump_counter("unparsable date")
+            maybe_counter("unparsable date")
             logger.warn("Error parsing date %s on line %s: %s\n%s" format (
               timestring, lineno, line, pe))
             0
@@ -636,7 +731,7 @@ object ParseTweets extends ScoobiProcessFilesApp[ParseTweetsParams] {
       def parse_problem(e: Exception) = {
         logger.warn("Error parsing line %s: %s\n%s" format (
           lineno, line, stack_trace_as_string(e)))
-        ("error", empty_tweet)
+        ("error", null)
       }
 
       /**
@@ -651,7 +746,7 @@ object ParseTweets extends ScoobiProcessFilesApp[ParseTweetsParams] {
           fieldval \= field
           if (fieldval == liftweb.json.JNothing) {
             val fieldpath = path mkString "."
-            bump_counter("ERROR: tweet with missing field %s" format fieldpath)
+            maybe_counter("ERROR: tweet with missing field %s" format fieldpath)
             warning(line, "Can't find field path %s in tweet", fieldpath)
             throw new ParseJSonExit
           }
@@ -685,7 +780,7 @@ object ParseTweets extends ScoobiProcessFilesApp[ParseTweetsParams] {
               end = indices(1).intValue
               if {
                 if (value.length == 0) {
-                  bump_counter("zero length %s/%s seen" format (key, subkey))
+                  maybe_counter("zero length %s/%s seen" format (key, subkey))
                   warning(line,
                     "Zero-length %s/%s in interval [%d,%d], skipped",
                     key, subkey, start, end)
@@ -777,11 +872,11 @@ object ParseTweets extends ScoobiProcessFilesApp[ParseTweetsParams] {
         */
         val parsed = liftweb.json.parse(line)
         if ((parsed \ "delete" values) != None) {
-          bump_counter("tweet deletion notices skipped")
-          ("delete", empty_tweet)
+          maybe_counter("tweet deletion notices skipped")
+          ("delete", null)
         } else if ((parsed \ "limit" values) != None) {
-          bump_counter("tweet limit notices skipped")
-          ("limit", empty_tweet)
+          maybe_counter("tweet limit notices skipped")
+          ("limit", null)
         } else {
           val user = force_string(parsed, "user", "screen_name")
           val timestamp = parse_time(force_string(parsed, "created_at"))
@@ -862,7 +957,7 @@ object ParseTweets extends ScoobiProcessFilesApp[ParseTweetsParams] {
                 } yield {
               // Subtract one because of the initial @ in the index reference
               if (end - start - 1 != namelen) {
-                bump_counter("wrong length interval for screen name seen")
+                maybe_counter("wrong length interval for screen name seen")
                 warning(line, "Strange indices [%d,%d] for screen name %s, length %d != %d, text context is '%s'",
                   start, end, screen_name, end - start - 1, namelen,
                   raw_text.slice(start, end))
@@ -885,26 +980,26 @@ object ParseTweets extends ScoobiProcessFilesApp[ParseTweetsParams] {
 
           ("success",
             Tweet(if (opts.output_format == "raw") line else "",
-              Seq(text), user, tweet_id.toLong, timestamp,
+              path, Seq(text), user, tweet_id.toLong, timestamp,
               timestamp, timestamp, lat, long, followers, following, lang, 1,
               user_mentions, retweets, hashtags, urls))
         }
       } catch {
         case jpe: liftweb.json.JsonParser.ParseException => {
-          bump_counter("ERROR: lift-json parsing error")
+          maybe_counter("ERROR: lift-json parsing error")
           parse_problem(jpe)
         }
         case npe: NullPointerException => {
-          bump_counter("ERROR: NullPointerException when parsing")
+          maybe_counter("ERROR: NullPointerException when parsing")
           parse_problem(npe)
         }
         case nfe: NumberFormatException => {
-          bump_counter("ERROR: NumberFormatException when parsing")
+          maybe_counter("ERROR: NumberFormatException when parsing")
           parse_problem(nfe)
         }
-        case _: ParseJSonExit => ("error", empty_tweet)
+        case _: ParseJSonExit => ("error", null)
         case e: Exception => {
-          bump_counter("ERROR: %s when parsing" format e.getClass.getName)
+          maybe_counter("ERROR: %s when parsing" format e.getClass.getName)
           parse_problem(e); throw e
         }
       }
@@ -921,26 +1016,27 @@ object ParseTweets extends ScoobiProcessFilesApp[ParseTweetsParams] {
     }
 
     /*
-     * Parse a JSON line into a tweet.
+     * Parse a JSON line into a tweet.  Return `null` if unable to parse.
      */
-    def parse_json(line: String) = {
-      bump_counter("total lines")
+    def parse_json(pathline: (String, String)) = {
+      val (path, line) = pathline
+      maybe_counter("total lines")
       lineno += 1
       // For testing
       // logger.debug("parsing JSON: %s" format line)
       if (line.trim == "") {
-        bump_counter("blank lines skipped")
-        empty_tweet
+        maybe_counter("blank lines skipped")
+        null
       }
       else {
-        bump_counter("total tweets parsed")
-        val (status, tweet) = parse_json_lift(line)
+        maybe_counter("total tweets parsed")
+        val (status, tweet) = parse_json_lift(path, line)
         if (status == "error") {
-          bump_counter("total tweets unsuccessfully parsed")
+          maybe_counter("total tweets unsuccessfully parsed")
         } else if (status == "success") {
-          bump_counter("total tweets successfully parsed")
+          maybe_counter("total tweets successfully parsed")
         } else {
-          bump_counter("total tweets skipped")
+          maybe_counter("total tweets skipped")
         }
         tweet
       }
@@ -1002,10 +1098,13 @@ object ParseTweets extends ScoobiProcessFilesApp[ParseTweetsParams] {
     def filter_tweets(values: DList[Tweet]) =
       filter_duplicates(values).filter(x => filter_tweet_by_tweet_filters(x))
 
-    def apply(lines: DList[String]) = {
+    /**
+     * Parse a set of JSON-formatted tweets.  Input is (path, JSON).
+     */
+    def apply(lines: DList[(String, String)]) = {
 
-      // Parse JSON into tweet records.
-      val values_extracted = lines.map(parse_json)
+      // Parse JSON into tweet records.  Filter out nulls (unparsable tweets).
+      val values_extracted = lines.map(parse_json).filter(_ != null)
 
       /* Filter duplicates, invalid tweets, tweets not matching any
          tweet-level boolean filters. (User-level boolean filters get
@@ -1036,6 +1135,7 @@ object ParseTweets extends ScoobiProcessFilesApp[ParseTweetsParams] {
     def tweet_to_record(tweet: Tweet) = {
       val key = opts.grouping match {
         case "user" => tweet.user
+        case "file" => tweet.path
         case "time" =>
           ((tweet.min_timestamp / opts.timeslice) * opts.timeslice).toString
         case "none" => tweet.id.toString
@@ -1056,6 +1156,7 @@ object ParseTweets extends ScoobiProcessFilesApp[ParseTweetsParams] {
       val t2 = tw2.tweet
       val id = if (t1.id != t2.id) -1L else t1.id
       val lang = if (t1.lang != t2.lang) "[multiple]" else t1.lang
+      val path = if (t1.path != t2.path) "[multiple]" else t1.path
       val (followers, following) =
         (math.max(t1.followers, t2.followers),
          math.max(t1.following, t2.following))
@@ -1083,7 +1184,7 @@ object ParseTweets extends ScoobiProcessFilesApp[ParseTweetsParams] {
 
       // FIXME maybe want to track the different users
       val tweet =
-        Tweet("", text, t1.user, id, min_timestamp, max_timestamp,
+        Tweet("", path, text, t1.user, id, min_timestamp, max_timestamp,
           geo_timestamp, lat, long, followers, following, lang, numtweets,
           user_mentions, retweets, hashtags, urls)
       Record(tw1.key, tw1.matches || tw2.matches, tweet)
@@ -1257,9 +1358,7 @@ object ParseTweets extends ScoobiProcessFilesApp[ParseTweetsParams] {
      * written out.
      */
     def tokenize_count_and_format(tweet: Tweet): String = {
-      val encoded_tweet = tweet.to_row
-      val formatted_text = emit_ngrams(tweet.text)
-      encoded_tweet + "\t" + formatted_text
+      tweet.to_row(this, opts)
     }
   }
 
@@ -1592,7 +1691,7 @@ object ParseTweets extends ScoobiProcessFilesApp[ParseTweetsParams] {
       logger.info("Outputting a schema to %s ..." format filename)
       // We add the counts data to what to_row() normally outputs so we
       // have to add the same field here
-      val fields = Tweet.row_fields ++ Seq("counts")
+      val fields = Tweet.row_fields(opts)
       val fixed_fields = Map(
         "corpus" -> opts.corpus_name,
         "corpus-type" -> ("twitter-%s" format opts.grouping),
@@ -1624,6 +1723,8 @@ object ParseTweets extends ScoobiProcessFilesApp[ParseTweetsParams] {
           format(opts.timeslice_float)
       case "user" =>
         "grouping by user"
+      case "file" =>
+        "grouping by file"
       case "none" =>
         "not grouping"
     }))
@@ -1638,7 +1739,8 @@ object ParseTweets extends ScoobiProcessFilesApp[ParseTweetsParams] {
     val ptp = new ParseTweetsDriver(opts)
 
     // Firstly we load up all the (new-line-separated) JSON lines.
-    val lines: DList[String] = TextInput.fromTextFile(opts.input)
+    val lines: DList[(String, String)] =
+      TextInput.fromTextFileWithPath(opts.input)
 
     errprint("ParseTweets: Generate tweets ...")
     val tweets1 = new ParseAndUniquifyTweets(opts)(lines)
@@ -1655,8 +1757,7 @@ object ParseTweets extends ScoobiProcessFilesApp[ParseTweetsParams] {
       val out_schema = new Schema(fields, Map("corpus" -> opts.corpus_name))
       val out_schema_fn = Schema.construct_schema_file(filehand,
           outdir, opts.corpus_name, corpus_suffix)
-      rename_output_files(configuration.fs, outdir, opts.corpus_name,
-        corpus_suffix)
+      rename_output_files(outdir, opts.corpus_name, corpus_suffix)
       out_schema.output_schema_file(filehand, out_schema_fn)
       outdir
     }
@@ -1678,8 +1779,7 @@ object ParseTweets extends ScoobiProcessFilesApp[ParseTweetsParams] {
     }
 
     def rename_outfiles() {
-      rename_output_files(configuration.fs, opts.output, opts.corpus_name,
-        ptp.corpus_suffix)
+      rename_output_files(opts.output, opts.corpus_name, ptp.corpus_suffix)
     }
 
     opts.output_format match {

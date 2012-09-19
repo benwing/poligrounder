@@ -275,19 +275,71 @@ object WordDist {
 }
 
 /**
+ * An interface for storing and retrieving vocabulary items (e.g. words,
+ * n-grams, etc.).
+ *
+ * @tparam Item Type of the items stored.
+ */
+trait ItemStorage[Item] {
+
+  /**
+   * Add an item with the given count.  If the item exists already,
+   * add the count to the existing value.
+   */
+  def add_item(item: Item, count: Double)
+
+  /**
+   * Set the item to the given count.  If the item exists already,
+   * replace its value with the given one.
+   */
+  def set_item(item: Item, count: Double)
+
+  /**
+   * Remove an item, if it exists.
+   */
+  def remove_item(item: Item)
+
+  /**
+   * Return whether a given item is stored.
+   */
+  def contains(item: Item): Boolean
+
+  /**
+   * Return the count of a given item.
+   */
+  def get_item(item: Item): Double
+
+  /**
+   * Iterate over all items that are stored.
+   */
+  def iter_items: Iterable[(Item, Double)]
+
+  /**
+   * Iterate over all keys that are stored.
+   */
+  def iter_keys: Iterable[Item]
+
+  /**
+   * Total number of tokens stored.
+   */
+  def num_tokens: Double
+
+  /**
+   * Total number of item types (i.e. number of distinct items)
+   * stored.
+   */
+  def num_types: Int
+}
+
+/**
  * A word distribution, i.e. a statistical distribution over words in
  * a document, cell, etc.
  */
-abstract class WordDist(factory: WordDistFactory, val note_globally: Boolean) {
-  /** Number of word tokens seen in the distribution. */
-  def num_word_tokens: Double
+abstract class WordDist(factory: WordDistFactory,
+    val note_globally: Boolean) {
+  type Item
+  val model: ItemStorage[Item]
 
-  /**
-   * Number of word types seen in the distribution
-   * (i.e. number of different vocabulary items seen).
-   */
-  def num_word_types: Long
-  
   /**
    * Whether we have finished computing the distribution, and therefore can
    * reliably do probability lookups.
@@ -350,6 +402,26 @@ abstract class WordDist(factory: WordDistFactory, val note_globally: Boolean) {
     assert(finished_before_global)
     imp_finish_after_global()
     finished = true
+  }
+
+  /**
+   * Return the Dunning log-likelihood of an item in two different corpora,
+   * indicating how much more likely the item is in this corpus than the
+   * other to be different.
+   */
+  def dunning_log_likelihood(item: Item, other: WordDist) = {
+    val a = model.get_item(item).toDouble
+    // This cast is kind of ugly but I don't see a way around it.
+    val b = other.model.get_item(item.asInstanceOf[other.Item]).toDouble
+    val c = model.num_tokens.toDouble
+    val d = other.model.num_tokens.toDouble
+    val factor = (a+b)/(c+d)
+    val e1 = c*factor
+    val e2 = d*factor
+    val f1 = if (a > 0) a*math.log(a/e1) else 0.0
+    val f2 = if (b > 0) b*math.log(b/e2) else 0.0
+    val g2 = 2*(f1+f2)
+    g2
   }
 
   /**

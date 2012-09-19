@@ -33,7 +33,11 @@ object ScoobiWordCount extends ScoobiApp {
     System.err.println("file system key " +
       configuration.get(FileSystem.FS_DEFAULT_NAME_KEY, "value not found"))
 
-    val lines = fromTextFile(args(0))
+    val lines =
+      // Test fromTextFileWithPath, but currently appears to trigger an
+      // infinite loop.
+      // TextInput.fromTextFileWithPath(args(0))
+      TextInput.fromTextFile(args(0)).map(x => (args(0), x))
 
     def splitit(x: String) = {
       HadoopLogFactory.setQuiet(false)
@@ -43,10 +47,13 @@ object ScoobiWordCount extends ScoobiApp {
       x.split(" ")
     }
     //val counts = lines.flatMap(_.split(" "))
-    val counts = lines.flatMap(splitit)
+    val counts = lines.map(_._2).flatMap(splitit)
                           .map(word => (word, 1))
                           .groupByKey
                           .filter { case (word, len) => word.length < 8 }
+                          // It should be possible to just combine(), but not
+                          // currently; safeCombine() is a temporary hack
+                          // .combine((a: Int, b: Int) => a + b)
                           .safeCombine((a: Int, b: Int) => a + b)
     persist(toTextFile(counts, args(1)))
   }
