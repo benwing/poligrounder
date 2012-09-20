@@ -43,10 +43,11 @@ object ScoobiWordCount extends ScoobiApp {
       x.split(" ")
     }
     //val counts = lines.flatMap(_.split(" "))
-    val counts = lines.flatMap(splitit)
-                          .map(word => (word, 1))
+    val counts = lines.map(_._2).flatMap(splitit)
+                          .map(word => (word, word.length))
                           .groupByKey
-                          .filter { case (word, len) => word.length < 8 }
+                          .filter { x => x._2.exists(_ < 6) }
+                          // .filter { case (word, len) => word.length < 6 }
                           .safeCombine((a: Int, b: Int) => a + b)
     persist(toTextFile(counts, args(1)))
   }
