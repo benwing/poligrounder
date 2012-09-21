@@ -275,19 +275,71 @@ object WordDist {
 }
 
 /**
+ * An interface for storing and retrieving vocabulary items (e.g. words,
+ * n-grams, etc.).
+ *
+ * @tparam Item Type of the items stored.
+ */
+trait ItemStorage[Item] {
+
+  /**
+   * Add an item with the given count.  If the item exists already,
+   * add the count to the existing value.
+   */
+  def add_item(item: Item, count: Double)
+
+  /**
+   * Set the item to the given count.  If the item exists already,
+   * replace its value with the given one.
+   */
+  def set_item(item: Item, count: Double)
+
+  /**
+   * Remove an item, if it exists.
+   */
+  def remove_item(item: Item)
+
+  /**
+   * Return whether a given item is stored.
+   */
+  def contains(item: Item): Boolean
+
+  /**
+   * Return the count of a given item.
+   */
+  def get_item(item: Item): Double
+
+  /**
+   * Iterate over all items that are stored.
+   */
+  def iter_items: Iterable[(Item, Double)]
+
+  /**
+   * Iterate over all keys that are stored.
+   */
+  def iter_keys: Iterable[Item]
+
+  /**
+   * Total number of tokens stored.
+   */
+  def num_tokens: Double
+
+  /**
+   * Total number of item types (i.e. number of distinct items)
+   * stored.
+   */
+  def num_types: Int
+}
+
+/**
  * A word distribution, i.e. a statistical distribution over words in
  * a document, cell, etc.
  */
-abstract class WordDist(factory: WordDistFactory, val note_globally: Boolean) {
-  /** Number of word tokens seen in the distribution. */
-  def num_word_tokens: Double
+abstract class WordDist(factory: WordDistFactory,
+    val note_globally: Boolean) {
+  type Item
+  val model: ItemStorage[Item]
 
-  /**
-   * Number of word types seen in the distribution
-   * (i.e. number of different vocabulary items seen).
-   */
-  def num_word_types: Long
-  
   /**
    * Whether we have finished computing the distribution, and therefore can
    * reliably do probability lookups.
@@ -350,6 +402,58 @@ abstract class WordDist(factory: WordDistFactory, val note_globally: Boolean) {
     assert(finished_before_global)
     imp_finish_after_global()
     finished = true
+  }
+
+  def dunning_log_likelihood_1(a: Double, b: Double, c: Double, d: Double) = {
+    val cprime = a+c
+    val dprime = b+d
+    val factor = (a+b)/(cprime+dprime)
+    val e1 = cprime*factor
+    val e2 = dprime*factor
+    val f1 = if (a > 0) a*math.log(a/e1) else 0.0
+    val f2 = if (b > 0) b*math.log(b/e2) else 0.0
+    val g2 = 2*(f1+f2)
+    g2
+  }
+
+  def dunning_log_likelihood_2(a: Double, b: Double, c: Double, d: Double) = {
+    val N = a+b+c+d
+    def m(x: Double) = if (x > 0) x*math.log(x) else 0.0
+    2*(m(a) + m(b) + m(c) + m(d) + m(N) - m(a+b) - m(a+c) - m(b+d) - m(c+d))
+  }
+
+  /**
+   * Return the Dunning log-likelihood of an item in two different corpora,
+   * indicating how much more likely the item is in this corpus than the
+   * other to be different.
+   */
+  def dunning_log_likelihood_2x1(item: Item, other: WordDist) = {
+    val a = model.get_item(item).toDouble
+    // This cast is kind of ugly but I don't see a way around it.
+    val b = other.model.get_item(item.asInstanceOf[other.Item]).toDouble
+    val c = model.num_tokens.toDouble - a
+    val d = other.model.num_tokens.toDouble - b
+    val val1 = dunning_log_likelihood_1(a, b, c, d)
+    val val2 = dunning_log_likelihood_2(a, b, c, d)
+    if (debug("dunning"))
+      errprint("Comparing log-likelihood for %g %g %g %g = %g vs. %g",
+        a, b, c, d, val1, val2)
+    val1
+  }
+
+  def dunning_log_likelihood_2x2(item: Item, other_b: WordDist,
+      other_c: WordDist, other_d: WordDist) = {
+    val a = model.get_item(item).toDouble
+    // This cast is kind of ugly but I don't see a way around it.
+    val b = other_b.model.get_item(item.asInstanceOf[other_b.Item]).toDouble
+    val c = other_c.model.get_item(item.asInstanceOf[other_c.Item]).toDouble
+    val d = other_d.model.get_item(item.asInstanceOf[other_d.Item]).toDouble
+    val val1 = dunning_log_likelihood_1(a, b, c, d)
+    val val2 = dunning_log_likelihood_2(a, b, c, d)
+    if (debug("dunning"))
+      errprint("Comparing log-likelihood for %g %g %g %g = %g vs. %g",
+        a, b, c, d, val1, val2)
+    val2
   }
 
   /**

@@ -34,6 +34,7 @@ class TimeDocument(
   table: TimeDocumentTable
 ) extends DistDocument[TimeCoord](schema, table) {
   var coord: TimeCoord = _
+  var user: String = _
   def has_coord = coord != null
   def title = if (coord != null) coord.toString else "unknown time"
 
@@ -47,7 +48,8 @@ class TimeDocument(
 
   override def set_field(name: String, value: String) {
     name match {
-      case "timestamp" => coord = get_x_or_null[TimeCoord](value)
+      case "min-timestamp" => coord = get_x_or_null[TimeCoord](value)
+      case "user" => user = value
       case _ => super.set_field(name, value)
     }
   }

@@ -66,6 +66,7 @@ import collection.mutable
 import opennlp.textgrounder.{util=>tgutil}
 import tgutil.argparser._
 import tgutil.collectionutil._
+import tgutil.corpusutil._
 import tgutil.distances._
 import tgutil.experiment._
 import tgutil.ioutil.{FileHandler, LocalFileHandler}
@@ -106,25 +107,58 @@ See GridLocate.scala.
  */
 class PoligrounderParameters(parser: ArgParser = null) extends
     GridLocateParameters(parser) {
-  var from =
-    ap.option[String]("f", "from",
-      help = """Chunk of start time to compare.""")
+  var from = ap.option[String]("f", "from",
+    help = """Chunk of start time to compare.""")
 
-  var to =
-    ap.option[String]("t", "to",
-      help = """Chunk of end time to compare.""")
+  var to = ap.option[String]("t", "to",
+    help = """Chunk of end time to compare.""")
 
-  var min_prob =
-    ap.option[Double]("min-prob", "mp", default = 0.0,
-      help = """Mininum probability when comparing distributions.
-      Default is 0.0, which means no restrictions.""")
+  var min_prob = ap.option[Double]("min-prob", "mp", default = 0.0,
+    help = """Mininum probability when comparing distributions.
+    Default is 0.0, which means no restrictions.""")
 
-  var max_items =
-    ap.option[Int]("max-items", "mi", default = 200,
-      help = """Maximum number of items (words or n-grams) to output when
-      comparing distributions.  Default is %default.  This applies separately
-      to those items that have increased and decreased, meaning the total
-      number counting both kinds may be as much as twice the maximum.""")
+  var max_items = ap.option[Int]("max-items", "mi", default = 200,
+    help = """Maximum number of items (words or n-grams) to output when
+    comparing distributions.  Default is %default.  This applies separately
+    to those items that have increased and decreased, meaning the total
+    number counting both kinds may be as much as twice the maximum.""")
+
+  var ideological_user_corpus = ap.option[String](
+    "ideological-user-corpus", "iuc",
+    help="""File containing corpus output from FindPolitical, listing
+    users and associated ideologies.""")
+
+  var ideological_users: Map[String, Double] = _
+  var ideological_users_liberal: Map[String, Double] = _
+  var ideological_users_conservative: Map[String, Double] = _
+  var ideological_categories: Seq[String] = _
+
+  var mode = ap.option[String]("m", "mode",
+    default = "combined",
+    choices = Seq("combined", "ideo-users"),
+    help = """How to compare distributions.  Possible values are
+    
+    'combined': For a given time period, combine all users into a single
+    distribution.
+    
+    'ideo-users': Retrieve the ideology of the users and use that to
+    separate the users into liberal and conservative, and compare those
+    separately.""")
+}
+
+/**
+ * A simple field-text file processor that just records the users and ideology.
+ *
+ * @param suffix Suffix used to select document metadata files in a directory
+ */
+class IdeoUserFileProcessor extends
+    CorpusFieldFileProcessor[(String, Double)]("ideo-users") {
+  def handle_row(fieldvals: Seq[String]) = {
+    val user = schema.get_field(fieldvals, "user")
+    val ideology =
+      schema.get_field(fieldvals, "ideology").toDouble
+    Some((user, ideology))
+  }
 }
 
 class PoligrounderDriver extends
@@ -149,7 +183,25 @@ class PoligrounderDriver extends
     from_chunk = parse_interval(params.from)
     to_chunk = parse_interval(params.to)
 
+    if (params.ideological_user_corpus != null) {
+      val processor = new IdeoUserFileProcessor
+      val users =
+        processor.read_corpus(new LocalFileHandler,
+          params.ideological_user_corpus).flatten.toMap
+      params.ideological_users = users
+      params.ideological_users_liberal =
+        users filter { case (u, ideo) => ideo < 0.33 }
+      params.ideological_users_conservative =
+        users filter { case (u, ideo) => ideo > 0.66 }
+      params.ideological_categories = Seq("liberal", "conservative")
+    } else
+      params.ideological_categories = Seq("all")
+
     super.handle_parameters()
+  }
+
+  override protected def initialize_word_dist_suffix() = {
+    super.initialize_word_dist_suffix() + "-tweets"
   }
 
   protected def initialize_document_table(word_dist_factory: WordDistFactory) = {
@@ -157,12 +209,28 @@ class PoligrounderDriver extends
   }
 
   protected def initialize_cell_grid(table: TimeDocumentTable) = {
-    new TimeCellGrid(from_chunk, to_chunk, table)
+    if (params.ideological_user_corpus == null)
+      new TimeCellGrid(from_chunk, to_chunk, Seq("all"), x => "all", table)
+    else
+      new TimeCellGrid(from_chunk, to_chunk, Seq("liberal", "conservative"),
+        x => {
+          if (params.ideological_users_liberal contains x.user)
+            "liberal"
+          else if (params.ideological_users_conservative contains x.user)
+            "conservative"
+          else
+            null
+        }, table)
   }
 
   def run_after_setup() {
-    DistributionComparer.compare_cells(cell_grid.asInstanceOf[TimeCellGrid],
-      params.min_prob, params.max_items)
+    if (params.ideological_user_corpus == null)
+      DistributionComparer.compare_cells(cell_grid.asInstanceOf[TimeCellGrid],
+        "all", params.min_prob, params.max_items)
+    else
+      DistributionComparer.compare_cells_2way(
+        cell_grid.asInstanceOf[TimeCellGrid], "liberal", "conservative",
+        params.min_prob, params.max_items)
   }
 }
 

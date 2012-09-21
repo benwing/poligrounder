@@ -19,6 +19,7 @@
 package opennlp.textgrounder.util
 
 import collection.mutable
+import util.control.Breaks._
 
 import java.io.PrintStream
 
@@ -478,7 +479,7 @@ package object corpusutil {
   }
 
   object CorpusFileProcessor {
-    val possible_compression_re = """(\.[a-zA-Z0-9]+)?$"""
+    val possible_compression_re = """(\.bz2|\.bzip2|\.gz|\.gzip)?$"""
     /**
      * For a given suffix, create a regular expression
      * ([[scala.util.matching.Regex]]) that matches document files of the
@@ -537,7 +538,7 @@ package object corpusutil {
      */
     def get_matching_patterns(filehand: FileHandler, dir: String,
         suffix: String) = {
-      val possible_endings = Seq("", ".bz2", ".gz")
+      val possible_endings = Seq("", ".bz2", ".bzip2", ".gz", ".gzip")
       for {ending <- possible_endings
            full_ending = "-%s.txt%s" format (suffix, ending)
            pattern = filehand.join_filename(dir, "*%s" format full_ending)
@@ -549,19 +550,117 @@ package object corpusutil {
   }
 
   /**
-   * File processor for reading in a "corpus" of documents and processing
-   * rows as arrays of files (ala `FieldTextFileProcessor`).
+   * A basic file processor for reading in a "corpus" of documents and
+   * processing rows as arrays of fields (ala `FieldTextFileProcessor`).
+   * You might want to use the higher-level `CorpusFieldFileProcessor`.
    *
    * @param suffix the suffix of the corpus files, as described above
-   *     
    */
-  abstract class CorpusFieldFileProcessor[T](
+  abstract class BasicCorpusFieldFileProcessor[T](
     suffix: String
   ) extends CorpusFileProcessor[T](suffix) with FieldTextFileProcessor[T] {
     override def set_schema(schema: Schema) {
       super.set_schema(schema)
       set_fieldnames(schema.fieldnames)
     }
+  }
+
+  class ExitFieldProcessor[T](val value: Option[T]) extends Throwable { }
+
+  /**
+   * A file processor for reading in a "corpus" of documents and
+   * processing rows as arrays of fields (ala `FieldTextFileProcessor`).
+   * Each row is assumed to generate an object of type T.  The result
+   * of calling `process_file` will be a Seq[T] of all objects, and
+   * the result of calling `process_files` to process all files will
+   * be a Seq[Seq[T]], one per file.
+   *
+   * You should implement `handle_row`, which is passed in the field
+   * values, and should return either `Some(x)` for x of type T, if
+   * you were able to process the row, or `None` otherwise.  If you
+   * want to exit further processing, throw a `ExitFieldProcessor(value)`,
+   * where `value` is either `Some(x)` or `None`, as for a normal return
+   * value.
+   *
+   * @param suffix the suffix of the corpus files, as described above
+   */
+  abstract class CorpusFieldFileProcessor[T](suffix: String) extends
+      BasicCorpusFieldFileProcessor[Seq[T]](suffix) {
+
+    def handle_row(fieldvals: Seq[String]): Option[T]
+
+    val values_so_far = mutable.ListBuffer[T]()
+
+    def process_row(fieldvals: Seq[String]): (Boolean, Boolean) = {
+      try {
+        handle_row(fieldvals) match {
+          case Some(x) => { values_so_far += x; return (true, true) }
+          case None => { return (false, true) }
+        }
+      } catch {
+        case exit: ExitFieldProcessor[T] => {
+          exit.value match {
+            case Some(x) => { values_so_far += x; return (true, false) }
+            case None => { return (false, false) }
+          }
+        }
+      }
+    }
+
+    val task = new MeteredTask("document", "reading")
+    def process_lines(lines: Iterator[String],
+        filehand: FileHandler, file: String,
+        compression: String, realname: String) = {
+      var should_stop = false
+      values_so_far.clear()
+      breakable {
+        for (line <- lines) {
+          if (!parse_row(line)) {
+            should_stop = true
+            break
+          }
+        }
+      }
+      (!should_stop, values_so_far.toSeq)
+    }
+
+    override def end_processing(filehand: FileHandler, files: Iterable[String]) {
+      task.finish()
+      super.end_processing(filehand, files)
+    }
+
+    /**
+     * Read a corpus from a directory and return the result of processing the
+     * rows in the corpus. (If you want more control over the processing,
+     * call `read_schema_from_corpus` and then `process_files`.  This allows,
+     * for example, reading files from multiple directories with a single
+     * schema, or determining whether processing was aborted early or allowed
+     * to run to completion.)
+     *
+     * @param filehand File handler object of the directory
+     * @param dir Directory to read
+     *
+     * @return A sequence of sequences of values.  There is one inner sequence
+     *   per file read in, and each such sequence contains all the values
+     *   read from the file. (There may be fewer values than rows in a file
+     *   if some rows were rejected by `handle_row`, and there may be fewer
+     *   files read than exist in the directory if `handle_row` signalled that
+     *   processing should stop.)
+     */
+    def read_corpus(filehand: FileHandler, dir: String) = {
+      read_schema_from_corpus(filehand, dir)
+      val (finished, value) = process_files(filehand, Seq(dir))
+      value
+    }
+
+    /*
+    FIXME: Should be implemented.  Requires that process_files() returns
+    the filename along with the value. (Should not be a problem for any
+    existing users of BasicCorpusFieldFileProcessor, because AFAIK they
+    ignore the value.)
+
+    def read_corpus_with_filenames(filehand: FileHandler, dir: String) = ...
+    */
   }
 
   /**
@@ -630,10 +729,12 @@ package object corpusutil {
       decode_chars_regex.replaceAllIn(str, m => decode_chars_map(m.matched))
   }
 
-  private val endec_word_for_counts_field =
+  private val endec_string_for_count_map_field =
     new EncodeDecode(Seq('%', ':', ' ', '\t', '\n', '\r', '\f'))
-  private val endec_string_for_field =
+  private val endec_string_for_sequence_field =
     new EncodeDecode(Seq('%', '>', '\t', '\n', '\r', '\f'))
+  private val endec_string_for_whole_field =
+    new EncodeDecode(Seq('%', '\t', '\n', '\r', '\f'))
 
   /**
    * Encode a word for placement inside a "counts" field.  Colons and spaces
@@ -650,56 +751,70 @@ package object corpusutil {
    * unnecessary and would make the raw files harder to read.  In the case of
    * HTML-style encoding, : isn't even escaped, so that wouldn't work at all.
    */
-  def encode_word_for_counts_field(word: String) =
-    endec_word_for_counts_field.encode(word)
+  def encode_string_for_count_map_field(word: String) =
+    endec_string_for_count_map_field.encode(word)
 
   /**
    * Encode an n-gram into text suitable for the "counts" field.
    The
    * individual words are separated by colons, and each word is encoded
-   * using `encode_word_for_counts_field`.  We need to encode '\n'
+   * using `encode_string_for_count_map_field`.  We need to encode '\n'
    * (record separator), '\t' (field separator), ' ' (separator between
    * word/count pairs), ':' (separator between word and count),
    * '%' (encoding indicator).
    */
-  def encode_ngram_for_counts_field(ngram: Iterable[String]) = {
-    ngram.map(encode_word_for_counts_field) mkString ":"
+  def encode_ngram_for_count_map_field(ngram: Iterable[String]) = {
+    ngram.map(encode_string_for_count_map_field) mkString ":"
   }
 
   /**
-   * Decode a word encoded using `encode_word_for_counts_field`.
+   * Decode a word encoded using `encode_string_for_count_map_field`.
    */
-  def decode_word_for_counts_field(word: String) =
-    endec_word_for_counts_field.decode(word)
+  def decode_string_for_count_map_field(word: String) =
+    endec_string_for_count_map_field.decode(word)
 
   /**
-   * Encode a string for placement as the value of a field.  This is
-   * similar to `encode_word_for_counts_field` except that we don't
-   * encode spaces.  We encode '&gt;' for possible use as a separator
+   * Encode a string for placement in a field consisting of a sequence
+   * of strings.  This is similar to `encode_string_for_count_map_field` except
+   * that we don't encode spaces.  We encode '&gt;' for use as a separator
    * inside of a field (since it's almost certain not to occur, because
    * we generally get HTML-encoded text; and even if not, it's fairly
    * rare).
    */
-  def encode_string_for_field(word: String) =
-    endec_string_for_field.encode(word)
+  def encode_string_for_sequence_field(word: String) =
+    endec_string_for_sequence_field.encode(word)
 
   /**
-   * Decode a string encoded using `encode_string_for_field`.
+   * Decode a string encoded using `encode_string_for_sequence_field`.
    */
-  def decode_string_for_field(word: String) =
-    endec_string_for_field.decode(word)
+  def decode_string_for_sequence_field(word: String) =
+    endec_string_for_sequence_field.decode(word)
 
   /**
-   * Decode an n-gram encoded using `encode_ngram_for_counts_field`.
+   * Encode a string for placement in a field by itself.  This is similar
+   * to `encode_word_for_sequence_field` except that we don't encode the &gt;
+   * sign.
    */
-  def decode_ngram_for_counts_field(ngram: String) = {
-    ngram.split(":", -1).map(decode_word_for_counts_field)
+  def encode_string_for_whole_field(word: String) =
+    endec_string_for_whole_field.encode(word)
+
+  /**
+   * Decode a string encoded using `encode_string_for_whole_field`.
+   */
+  def decode_string_for_whole_field(word: String) =
+    endec_string_for_whole_field.decode(word)
+
+  /**
+   * Decode an n-gram encoded using `encode_ngram_for_count_map_field`.
+   */
+  def decode_ngram_for_count_map_field(ngram: String) = {
+    ngram.split(":", -1).map(decode_string_for_count_map_field)
   }
 
   /**
    * Split counts field into the encoded n-gram section and the word count.
    */
-  def shallow_split_counts_field(field: String) = {
+  def shallow_split_count_map_field(field: String) = {
     val last_colon = field.lastIndexOf(':')
     if (last_colon < 0)
       throw FileFormatException(
@@ -712,15 +827,15 @@ package object corpusutil {
   /**
    * Split counts field into n-gram and word count.
    */
-  def deep_split_counts_field(field: String) = {
-    val (encoded_ngram, count) = shallow_split_counts_field(field)
-    (decode_ngram_for_counts_field(encoded_ngram), count)
+  def deep_split_count_map_field(field: String) = {
+    val (encoded_ngram, count) = shallow_split_count_map_field(field)
+    (decode_ngram_for_count_map_field(encoded_ngram), count)
   }
 
   /**
    * Serialize a sequence of (encoded-word, count) pairs into the format used
    * in a corpus.  The word or ngram must already have been encoded using
-   * `encode_word_for_counts_field` or `encode_ngram_for_counts_field`.
+   * `encode_string_for_count_map_field` or `encode_ngram_for_count_map_field`.
    */
   def shallow_encode_word_count_map(seq: collection.Seq[(String, Int)]) = {
     // Sorting isn't strictly necessary but ensures consistent output as well
@@ -735,7 +850,7 @@ package object corpusutil {
    */
   def encode_word_count_map(seq: collection.Seq[(String, Int)]) = {
     shallow_encode_word_count_map(seq map {
-      case (word, count) => (encode_word_for_counts_field(word), count)
+      case (word, count) => (encode_string_for_count_map_field(word), count)
     })
   }
 
@@ -761,7 +876,7 @@ package object corpusutil {
             "For unigram counts, WORD in WORD:COUNT must not be empty, but %s seen"
             format wordcount)
         val count = strcount.toInt
-        val decoded_word = decode_word_for_counts_field(word)
+        val decoded_word = decode_string_for_count_map_field(word)
         (decoded_word, count)
       }
     }
@@ -771,9 +886,10 @@ package object corpusutil {
     def count_map(x: Map[String, Int]) = encode_word_count_map(x.toSeq)
     def count_map_seq(x: collection.Seq[(String, Int)]) =
       encode_word_count_map(x)
-    def string(x: String) = encode_string_for_field(x)
+    def string(x: String) = encode_string_for_whole_field(x)
+    def string_in_seq(x: String) = encode_string_for_sequence_field(x)
     def seq_string(x: Seq[String]) =
-      x.map(encode_string_for_field) mkString ">>"
+      x.map(encode_string_for_sequence_field) mkString ">>"
     def timestamp(x: Long) = x.toString
     def long(x: Long) = x.toString
     def int(x: Int) = x.toString
@@ -783,8 +899,9 @@ package object corpusutil {
   object Decoder {
     def count_map(x: String) = decode_word_count_map(x).toMap
     def count_map_seq(x: String) = decode_word_count_map(x)
-    def string(x: String) = decode_string_for_field(x)
-    def seq_string(x: String) = x.split(">>", -1).map(decode_string_for_field)
+    def string(x: String) = decode_string_for_whole_field(x)
+    def seq_string(x: String) =
+      x.split(">>", -1).map(decode_string_for_sequence_field)
     def timestamp(x: String) = x.toLong
     def long(x: String) = x.toLong
     def int(x: String) = x.toInt

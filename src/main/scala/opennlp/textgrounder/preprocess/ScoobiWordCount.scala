@@ -8,17 +8,6 @@ import org.apache.hadoop.fs.FileSystem
 import java.io._
 
 object ScoobiWordCount extends ScoobiApp {
-  implicit def toPimpedDlist[K,V](dl: DList[(K, Iterable[V])]) = new PimpedDList(dl)
-  class PimpedDList[K,V](dl: DList[(K,Iterable[V])]) {
-      def safeCombine(f: (V, V) => V)
-        (implicit mK: Manifest[K],
-         wtK: WireFormat[K],
-         grpK: Grouping[K],
-         mV: Manifest[V],
-         wtV: WireFormat[V]): DList[(K, V)] = dl.map {
-           case (k, vs) => (k, vs.reduce(f)) }
-    }
-
   def run() {
     // There's some magic here in the source code to make the get() call
     // work -- there's an implicit conversion in object ScoobiConfiguration
@@ -33,7 +22,11 @@ object ScoobiWordCount extends ScoobiApp {
     System.err.println("file system key " +
       configuration.get(FileSystem.FS_DEFAULT_NAME_KEY, "value not found"))
 
-    val lines = fromTextFile(args(0))
+    val lines =
+      // Test fromTextFileWithPath, but currently appears to trigger an
+      // infinite loop.
+      // TextInput.fromTextFileWithPath(args(0))
+      TextInput.fromTextFile(args(0)).map(x => (args(0), x))
 
     def splitit(x: String) = {
       HadoopLogFactory.setQuiet(false)
@@ -48,7 +41,7 @@ object ScoobiWordCount extends ScoobiApp {
                           .groupByKey
                           .filter { x => x._2.exists(_ < 6) }
                           // .filter { case (word, len) => word.length < 6 }
-                          .safeCombine((a: Int, b: Int) => a + b)
+                          .combine((a: Int, b: Int) => a + b)
     persist(toTextFile(counts, args(1)))
   }
 }

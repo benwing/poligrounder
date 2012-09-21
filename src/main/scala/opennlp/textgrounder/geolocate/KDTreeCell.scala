@@ -114,12 +114,12 @@ class KdTreeCellGrid(table: SphereDocumentTable,
     }
   }
 
-  def find_best_cell_for_coord(coord: SphereCoord,
+  def find_best_cell_for_document(doc: SphereDocument,
       create_non_recorded: Boolean) = {
     // FIXME: implementation note: the KD tree should tile the entire earth's surface,
     // but there's a possibility of something going awry here if we've never
     // seen a evaluation point before.
-    leaves_to_cell(kdtree.getLeaf(Array(coord.lat, coord.long)))
+    leaves_to_cell(kdtree.getLeaf(Array(doc.coord.lat, doc.coord.long)))
   }
 
   /**
@@ -174,25 +174,23 @@ class KdTreeCellGrid(table: SphereDocumentTable,
       for (node <- nodes if node.parent != null) {
         val cell = nodes_to_cell(node)
         val wd = cell.combined_dist.word_dist
-        val uwd = wd.asInstanceOf[UnigramWordDist]
+        val model = wd.asInstanceOf[UnigramWordDist].model
 
-        for ((k,v) <- uwd.counts) {
-          uwd.counts.put(k, (1 - interpolateWeight) * v)
+        for ((k,v) <- model.iter_items) {
+          model.set_item(k, (1 - interpolateWeight) * v)
         }
 
         val pcell = nodes_to_cell(node.parent)
         val pwd = pcell.combined_dist.word_dist
-        val puwd = pwd.asInstanceOf[UnigramWordDist]
+        val pmodel = pwd.asInstanceOf[UnigramWordDist].model
 
-        for ((k,v) <- puwd.counts) {
-          val oldv = uwd.counts.getOrElse(k, 0.0)
+        for ((k,v) <- pmodel.iter_items) {
+          val oldv = if (model contains k) model.get_item(k) else 0.0
           val newv = oldv + interpolateWeight * v
           if (newv > interpolateWeight)
-            uwd.counts.put(k, newv)
+            model.set_item(k, newv)
         }
 
-        // gotta update these variables
-        uwd.num_word_tokens = uwd.counts.values.sum
         task.item_processed()
       }
       task.finish()

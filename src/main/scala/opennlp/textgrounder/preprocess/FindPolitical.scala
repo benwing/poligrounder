@@ -185,8 +185,8 @@ object FindPolitical extends
       Seq("user", "ideology",
         "num-ideo-accounts", "num-ideo-refs", "ideo-refs",
         "num-lib-ideo-accounts", "num-lib-ideo-refs", "lib-ideo-refs",
-        "num-cons-ideo-accounts", "num-cons-ideo-refs", "cons-ideo-refs",
-        "fields")
+        "num-cons-ideo-accounts", "num-cons-ideo-refs", "cons-ideo-refs") ++
+      user_subschema_fieldnames
 
     /**
      * For a given user, determine if the user is an "ideological user"
@@ -433,11 +433,19 @@ object FindPolitical extends
         fields: Seq[String]) {
       val outdir = opts.output + "-" + corpus_suffix
       persist(TextOutput.toTextFile(lines, outdir))
-      val out_schema = new Schema(fields, Map("corpus" -> opts.corpus_name))
+      val fixed_fields =
+        Map("corpus" -> opts.corpus_name,
+            "generating-app" -> "FindPolitical",
+            "corpus-type" -> "twitter-%s".format(corpus_suffix)) ++
+        opts.non_default_params_string.toMap ++
+        Map(
+          "ideological-ref-type" -> opts.ideological_ref_type,
+          "political-feature-type" -> "%s".format(opts.political_feature_type)
+        )
+      val out_schema = new Schema(fields, fixed_fields)
       val out_schema_fn = Schema.construct_schema_file(filehand,
           outdir, opts.corpus_name, corpus_suffix)
-      rename_output_files(configuration.fs, outdir, opts.corpus_name,
-        corpus_suffix)
+      rename_output_files(outdir, opts.corpus_name, corpus_suffix)
       out_schema.output_schema_file(filehand, out_schema_fn)
     }
 

@@ -205,7 +205,7 @@ class DocumentEvaluationResult[
   /**
    * True cell in the cell grid in which the document belongs
    */
-  val true_cell = cell_grid.find_best_cell_for_coord(document.coord, true)
+  val true_cell = cell_grid.find_best_cell_for_document(document, true)
   /**
    * Number of documents in the true cell
    */
@@ -856,7 +856,7 @@ abstract class CellGridEvaluator[
     assert(!would_skip_document(document, doctag))
     assert(document.dist.finished)
     val true_cell =
-      strategy.cell_grid.find_best_cell_for_coord(document.coord, true)
+      strategy.cell_grid.find_best_cell_for_document(document, true)
     if (debug("lots") || debug("commontop")) {
       val naitr = true_cell.combined_dist.num_docs_for_word_dist
       errprint("Evaluating document %s with %s word-dist documents in true cell",
@@ -925,7 +925,7 @@ abstract class RankedCellGridEvaluator[
     errprint("%s:Document %s:", doctag, document)
     // errprint("%s:Document distribution: %s", doctag, document.dist)
     errprint("%s:  %d types, %f tokens",
-      doctag, document.dist.num_word_types, document.dist.num_word_tokens)
+      doctag, document.dist.model.num_types, document.dist.model.num_tokens)
     errprint("%s:  true cell at rank: %s", doctag,
       result.asInstanceOf[RankedDocumentEvaluationResult[_,_,_,_]].true_rank)
     errprint("%s:  true cell: %s", doctag, result.true_cell)
@@ -1029,7 +1029,7 @@ abstract class CoordCellGridEvaluator[
     errprint("%s:Document %s:", doctag, document)
     // errprint("%s:Document distribution: %s", doctag, document.dist)
     errprint("%s:  %d types, %f tokens",
-      doctag, document.dist.num_word_types, document.dist.num_word_tokens)
+      doctag, document.dist.model.num_types, document.dist.model.num_tokens)
     errprint("%s:  true cell: %s", doctag, result.true_cell)
 
     errprint("%s:  Distance %s to true cell center at %s",
